@@ -22,40 +22,41 @@ load_dotenv()
 # .env constants
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 if not BOT_USERNAME:
-    logger.error("bot/: BOT_USERNAME field is missing in .env")
+    logger.error("BOT_USERNAME field is missing in .env")
     raise RuntimeError("BOT_USERNAME field is missing in .env")
 
 SECRET_TOKEN = os.getenv("SECRET_TOKEN")
 if not SECRET_TOKEN:
-    logger.error("bot/: SECRET_TOKEN field is missing in .env")
+    logger.error("SECRET_TOKEN field is missing in .env")
     raise RuntimeError("SECRET_TOKEN field is missing in .env")
 
 GROUP_ID = os.getenv("GROUP_ID")
+GROUP_LINK = os.getenv("GROUP_LINK")
 REFERRAL_MANDATORY_COUNT = os.getenv("REFERRAL_MANDATORY_COUNT")
 try:
     GROUP_ID = int(GROUP_ID)
     REFERRAL_MANDATORY_COUNT = int(REFERRAL_MANDATORY_COUNT)
 except ValueError as e:
-    logger.error("bot/: could not transfer types str -> int for GROUP_ID, REFERRAL_MANDATORY_COUNT. Closing application...")
+    logger.error("could not transfer types str -> int for GROUP_ID, REFERRAL_MANDATORY_COUNT. Closing application...")
     sys.exit(1)
 
 # Telegram constants
 COMMANDS = [
-    BotCommand("help", "Помощь"),
-    BotCommand("start", "Зарегистрироваться"),
-    BotCommand("my_refs", "Мои рефералы")
+    BotCommand("help", "Yordam"),
+    BotCommand("start", "Ro‘yxatdan o‘tish"),
+    BotCommand("my_refs", "Mening referallarim")
 ]
 
 # Cache
 _prev_can_write: dict[int, bool] = {}
+_joined_users: dict[int, datetime] = {}
 
 # Rate limit interval
 RATE_LIMIT_INTERVAL = timedelta(seconds=10)
 DATABASE_SEMAPHORE = asyncio.Semaphore(10) # <- Here put value of pool_size in db engine
-TELEGRAM_SEMAPHORE = asyncio.Semaphore(10) # <- Better keep in range 5-10
-BATCH_SIZE = 100
+BATCH_SIZE = 50
 SLEEP_BETWEEN_BATCHES = 0.5
-CHUNK_SIZE = 500
+CHUNK_SIZE = 50
 
 
 """ Logging setup """
@@ -74,15 +75,15 @@ def setup_logging():
     os.makedirs(log_dir, exist_ok=True)
     file_handler = RotatingFileHandler(
         filename=os.path.join(log_dir,"bot.log"),
-        maxBytes=1*1024*1024, # 1Mb
-        backupCount=3,
+        maxBytes=10*1024*1024, # 10Mb
+        backupCount=5,
         encoding="utf-8"
     )
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
 
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG)
     root.addHandler(console_handler)
     root.addHandler(file_handler)
 
@@ -102,23 +103,55 @@ async def self_chat_member_update(update: Update, context: ContextTypes.DEFAULT_
     if old.status in ("left", "kicked") and new.status == "member":
         await send_effective_chat_message(
             update=update,
-            text=f"Здравствуйте! Вы призвали @{BOT_USERNAME} для того чтобы я установил систему рефералов в этой группе."
-                 f"\n\n❗️ Для моей корректной работы пожалуйста, назначьте меня администратором в этой группе."
+            text=f"Assalomu alaykum! Siz @{BOT_USERNAME} ni ushbu guruhga referal tizimini o‘rnatishim uchun chaqirdingiz."
+                 f"\n\n❗️ To‘g‘ri ishlashim uchun, iltimos, meni ushbu guruhda administrator qilib tayinlang."
         )
     if old.status == "member" and new.status == "administrator":
         await send_effective_chat_message(
             update=update,
-            text="✅ Спасибо! Теперь я готов работать."
+            text="✅ Rahmat! Endi men ishga tayyorman."
         )
     return
 
 # Handle new user enters group
 async def new_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.debug("bot/new_chat_member_update: called, chat_id=%s", update.effective_chat.id)
-    if update.effective_chat.id != GROUP_ID:
+    logger.debug("new_chat_member_update: called, chat_id=%s", update.effective_chat.id)
+    now = datetime.utcnow()
+    chat_id = None
+    new_users = []
+
+    # MESSAGE UPDATE
+    if update.message and update.message.new_chat_members:
+        logger.debug("new_chat_member_update: type=MESSAGE UPDATE")
+        chat_id = update.effective_chat.id
+        new_users = update.message.new_chat_members
+
+    # MEMBER UPDATE
+    elif update.chat_member:
+        logger.debug("new_chat_member_update: type=MEMBER UPDATE")
+        member = update.chat_member
+        chat_id = member.chat.id
+        old, new = member.old_chat_member, member.new_chat_member
+        logger.debug(f"new_chat_member_update: STATUSES - OLD={old} NEW={new}")
+        if chat_id != GROUP_ID:
+            return
+        if old.status in ("left", "kicked") and new.status in ("member", "restricted"):
+            new_users = [new.user]
+        else:
+            logger.debug("new_chat_member_update: member with chat_id=%s is not new member", update.effective_chat.id)
+            return
+
+    if chat_id != GROUP_ID or not new_users:
         return
 
-    for user in update.message.new_chat_members:
+    for user in new_users:
+        # Deduplication
+        last = _joined_users.get(user.id)
+        if last and now - last < timedelta(seconds=30):
+            logger.debug("new_chat_member_update: skip duplicated join for %s", user.id)
+            continue
+        _joined_users[user.id] = now
+
         # If bot joined group: skip
         if user.username == BOT_USERNAME:
             continue
@@ -132,61 +165,74 @@ async def new_chat_member_update(update: Update, context: ContextTypes.DEFAULT_T
             async with DATABASE_SEMAPHORE:
                 await include_user(user_id)
         except UserAlreadyExists:
-            logger.warning("bot/new_chat_member_update: user already exists")
+            logger.warning("new_chat_member_update: user already exists")
             pass
         except DatabaseConnectionError:
-            logger.warning("bot/new_chat_member_update: could not connect to database")
+            logger.warning("new_chat_member_update: could not connect to database")
             return
 
         try:
             async with DATABASE_SEMAPHORE:
                 registered = await is_registered(user_id)
         except DatabaseConnectionError:
-            logger.warning("bot/new_chat_member_update: could not connect to database")
+            logger.warning("new_chat_member_update: could not connect to database")
             return
         can_write = False
         if not registered:
             await send_effective_chat_message(
                 update=update,
-                text=f"Здравствуй @{username}, Добро пожаловать в {update.effective_chat.title}!"
-                     f"\n\nЧтобы получить право размещать свои посты в этой группе, пожалуйста, зарегистрируйся по "
-                     f"этой ссылке: https://t.me/{BOT_USERNAME}?start"
+                text=f"Salom @{username}, {update.effective_chat.title} ga xush kelibsiz!"
+                     f"\n\nUshbu guruhda post joylash huquqini olish uchun, iltimos, quyidagi havola orqali ro‘yxatdan o‘ting "
+                     f"mana bu havola orqali: https://t.me/{BOT_USERNAME}?start"
             )
         else:
             try:
                 async with DATABASE_SEMAPHORE:
                     ref_count = await count_referrals(user_id)
             except DatabaseConnectionError:
-                logger.warning("bot/new_chat_member_update: could not connect to database")
+                logger.warning("new_chat_member_update: could not connect to database")
                 return
             can_write = ref_count >= REFERRAL_MANDATORY_COUNT
             await send_effective_chat_message(
                 update=update,
-                text=f"Добро пожаловать обратно, @{username}!"
+                text=f"Yana qaytib kelganingiz bilan, @{username}, xush kelibsiz!"
             )
         success = await set_permissions(context, GROUP_ID, user_id, can_write)
         if not success:
+            logger.debug("new_chat_member_update: finished with failure")
             return
-    logger.debug("bot/new_chat_member_update: finished, chat_id=%s", update.effective_chat.id)
+    logger.debug("new_chat_member_update: successfully finished")
 
 
 async def chat_member_periodic_update(context: ContextTypes.DEFAULT_TYPE):
-    logger.debug("bot/chat_member_periodic_update: called")
+    logger.debug("chat_member_periodic_update: called")
+
+    await send_default_context_message(
+        context=context,
+        text="Hurmatli foydalanuvchilar, eslatib o‘tamiz, guruhimizda referal dasturi amal qiladi."
+             "\n\nGuruhda post joylash huquqini faollashtirish uchun sizga quyidagilar kerak:"
+             f"\n1) Men bilan shaxsiy chatda https://t.me/{BOT_USERNAME}?start manzili orqali ro‘yxatdan o‘ting"
+             f"\n2) Guruhga {REFERRAL_MANDATORY_COUNT} nafar odamni taklif qiling va ularni referal havolangiz orqali ro‘yxatdan o‘tkazing"
+             " – bu havolani siz o‘zingiz ro‘yxatdan o‘tganingizda olgansiz."
+             f"\n\n\n⚠️ MUHIM ⚠️\n\nYangi referalni tizim hisobga olishi uchun, avvalo u guruhga qo‘shilishi kerak,"
+             f" so‘ngra esa sizning referal havolangiz orqali ro‘yxatdan o‘tishi zarur.\nAks holda u hisoblanmaydi!",
+        chat_id=GROUP_ID
+    )
 
     try:
         async with DATABASE_SEMAPHORE:
             user_ids = await get_included_user_ids()
     except DatabaseConnectionError:
-        logger.warning("bot/chat_member_periodic_update: could not connect to database")
+        logger.warning("chat_member_periodic_update: could not connect to database")
         return
     if not user_ids:
-        logger.debug("bot/chat_member_periodic_update: finished -> no chat members included")
+        logger.debug("chat_member_periodic_update: finished -> no chat members included")
         return
     try:
         async with DATABASE_SEMAPHORE:
             user_referral_counts = await get_registered_referral_counts(user_ids, CHUNK_SIZE)
     except DatabaseConnectionError:
-        logger.warning("bot/chat_member_periodic_update: could not connect to database")
+        logger.warning("chat_member_periodic_update: could not connect to database")
         return
 
     for i in range(0, len(user_ids), BATCH_SIZE):
@@ -200,26 +246,14 @@ async def chat_member_periodic_update(context: ContextTypes.DEFAULT_TYPE):
                 can_write = count >= REFERRAL_MANDATORY_COUNT
 
             async def proc(uid, is_allowed):
-                async with TELEGRAM_SEMAPHORE:
-                    success = await set_permissions(context, GROUP_ID, uid, is_allowed)
-                    if not success:
-                        pass
+                success = await set_permissions(context, GROUP_ID, uid, is_allowed)
+                if not success:
+                    pass
             tasks.append(asyncio.create_task(proc(user_id, can_write)))
         if tasks:
             await asyncio.gather(*tasks)
         await asyncio.sleep(SLEEP_BETWEEN_BATCHES)
-    await send_default_context_message(
-        context=context,
-        text="Уважаемые пользователи, напоминаю вам что в нашей группе действует реферальная программа."
-             "\n\nЧтобы разблокировать право размещать посты в этой группе, необходимо:"
-             f"\n1) Зарегистрируйтесь через личный чат со мной https://t.me/{BOT_USERNAME}?start"
-             f"\n2) Пригласите {REFERRAL_MANDATORY_COUNT} человек в группу и зарегистрируйте их через свою реферальную ссылку"
-             " которую вы получили при собственной регистрации."
-             f"\n\n\n⚠️ ВАЖНО ⚠️\n\nЧтобы вам засчитало регистрацию нового реферала, он должен сначала вступить в группу,"
-             f" а затем зарегистрироваться по вашей реферальной ссылке.\nИначе не сработает!",
-        chat_id=GROUP_ID
-    )
-    logger.debug("bot/chat_member_periodic_update: finished")
+    logger.debug("chat_member_periodic_update: finished")
 
 """ Commands """
 
@@ -246,25 +280,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_member = await context.bot.get_chat_member(GROUP_ID, telegram_id)
     except TelegramError as e:
-        logger.error("bot/chat_member_periodic_update: could not perform the operation for user %s due to %s", telegram_id, e)
+        logger.error("chat_member_periodic_update: could not perform the operation for user %s due to %s", telegram_id, e)
         await send_reply_message(
             update=update,
-            text="❌ Простите, мы не смогли выполнить операцию по неопределенным причинам. Пожалуйста, попробуйте позже!"
+            text="❌ Kechirasiz, noma’lum sabablarga ko‘ra amaliyotni bajarib bo‘lmadi. Iltimos, keyinroq yana urinib ko‘ring!"
         )
         return
     if chat_member.status not in ("creator", "administrator", "member", "restricted"):
-        try:
-            invite_link = await context.bot.export_chat_invite_link(GROUP_ID)
-        except TelegramError as e:
-            logger.error("bot/chat_member_periodic_update: could not perform the operation for user %s due to %s", telegram_id, e)
-            await send_reply_message(
-                update=update,
-                text="❌ Простите, мы не смогли выполнить операцию по неопределенным причинам. Пожалуйста, попробуйте позже!"
-            )
-            return
         await send_reply_message(
             update=update,
-            text=f"❕ Чтобы зарегистрироваться вы должны состоять в группе: {invite_link}"
+            text=f"❕ Ro‘yxatdan o‘tish uchun siz ushbu guruh a’zosi bo‘lishingiz kerak: {GROUP_LINK}"
         )
         return
 
@@ -273,13 +298,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await include_user(telegram_id)
         except UserAlreadyExists:
-            logger.warning("bot/start: user already exists -> GroupUserModel")
+            logger.warning("start: user already exists -> GroupUserModel")
             pass
         except DatabaseConnectionError:
-            logger.warning("bot/start: could not connect to database -> GroupUserModel")
+            logger.warning("start: could not connect to database -> GroupUserModel")
             await send_reply_message(
                 update=update,
-                text="❌ Простите, мы не смогли выполнить операцию по неопределенным причинам. Пожалуйста, попробуйте позже!"
+                text="❌ Kechirasiz, noma’lum sabablarga ko‘ra amaliyotni bajarib bo‘lmadi. Iltimos, keyinroq yana urinib ko‘ring!"
             )
             return
         try:
@@ -290,35 +315,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     ref_count = await count_referrals(inviter_id)
                 except DatabaseConnectionError:
-                    logger.warning("bot/start: could not connect to database")
+                    logger.warning("start: could not connect to database")
                     return
                 if ref_count >= REFERRAL_MANDATORY_COUNT:
                     success = await set_permissions(context, GROUP_ID, inviter_id, True)
                     if not success:
                         return
         except UserAlreadyExists:
-            logger.warning("bot/start: user already exists -> UserModel")
+            logger.warning("start: user already exists -> UserModel")
             await send_reply_message(
                 update=update,
-                text="❌ Вы уже и так зарегистрированы!"
+                text="❌ Siz allaqachon ro‘yxatdan o‘tgansiz!"
             )
             return
         except DatabaseConnectionError:
-            logger.warning("bot/start: could not connect to database -> UserModel")
+            logger.warning("start: could not connect to database -> UserModel")
             await send_reply_message(
                 update=update,
-                text="❌ Простите, мы не смогли выполнить операцию по неопределенным причинам. Пожалуйста, попробуйте позже!"
+                text="❌ Kechirasiz, noma’lum sabablarga ko‘ra amaliyotni bajarib bo‘lmadi. Iltimos, keyinroq yana urinib ko‘ring!"
             )
             return
 
         ref_link = f"https://t.me/{BOT_USERNAME}?start={user.referral_code}"
         await send_reply_message(
             update=update,
-            text=f"✅ Вы были успешно зарегистрированы!\n\n❗️ В группе действует реферальная программа ❗️"
-                 f"\nЧтобы получить доступ к отправке сообщений, пожалуйста, пригласите {REFERRAL_MANDATORY_COUNT}"
-                 f" пользователей в группу и попросите зарегистрироваться через меня по вашей реферальной ссылке: {ref_link}"
-                 f"\n\n\n⚠️ ВАЖНО ⚠️\n\nЧтобы вам засчитало регистрацию нового реферала, он должен сначала вступить в группу,"
-                 f" а затем зарегистрироваться по вашей реферальной ссылке.\nИначе не сработает!"
+            text=f"✅ Siz muvaffaqiyatli ro‘yxatdan o‘tdingiz!\n\n❗️ Guruhda referal dasturi amal qiladi ❗️"
+                 f"\nXabar yuborish huquqini olish uchun, iltimos, {REFERRAL_MANDATORY_COUNT} ta foydalanuvchini"
+                 f" guruhga taklif qiling va ulardan sizning referal havolangiz orqali ( {ref_link} ) ro‘yxatdan o‘tishni so‘rang"
+                 f"\n\n\n⚠️ MUHIM ⚠️\n\nYangi referalni tizim hisobga olishi uchun, avvalo u guruhga qo‘shilishi kerak,"
+                 f" so‘ngra esa sizning referal havolangiz orqali ro‘yxatdan o‘tishi zarur.\nAks holda u hisoblanmaydi!"
         )
 
 
@@ -342,16 +367,16 @@ async def my_refs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with DATABASE_SEMAPHORE:
             registered = await is_registered(telegram_id)
     except DatabaseConnectionError:
-        logger.warning("bot/my_refs: could not connect to database")
+        logger.warning("my_refs: could not connect to database")
         await send_reply_message(
             update=update,
-            text="❌ Простите, мы не смогли выполнить операцию по неопределенным причинам. Пожалуйста, попробуйте позже!"
+            text="❌ Kechirasiz, noma’lum sabablarga ko‘ra amaliyotni bajarib bo‘lmadi. Iltimos, keyinroq yana urinib ko‘ring!"
         )
         return
     if not registered:
         await send_reply_message(
             update=update,
-            text="❌ Вы еще не регистрировались"
+            text="❌ Siz hali ro‘yxatdan o‘tmagansiz"
         )
         return
     else:
@@ -359,17 +384,17 @@ async def my_refs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with DATABASE_SEMAPHORE:
                 ref_count = await count_referrals(telegram_id)
         except DatabaseConnectionError:
-            logger.warning("bot/my_refs: could not connect to database")
+            logger.warning("my_refs: could not connect to database")
             await send_reply_message(
                 update=update,
-                text="❌ Простите, мы не смогли выполнить операцию по неопределенным причинам. Пожалуйста, попробуйте позже!"
+                text="❌ Kechirasiz, noma’lum sabablarga ko‘ra amaliyotni bajarib bo‘lmadi. Iltimos, keyinroq yana urinib ko‘ring!"
             )
         ref_left = REFERRAL_MANDATORY_COUNT - ref_count
         if ref_left < 0:
             ref_left = 0
         await send_reply_message(
             update=update,
-            text=f"Количество ваших рефералов: {ref_count}. До получения прав вам осталось пригласить {ref_left} человек!"
+            text=f"Sizning referallaringiz soni: {ref_count}. Huquqni olish uchun yana {ref_left} nafar odam taklif qilishingiz kerak!"
         )
 
 
@@ -390,7 +415,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await send_reply_message(
         update=update,
-        text="🔧 Вот список команд:\n\n/start - Регистрация\n/my_refs - Просмотр рефералов"
+        text="🔧 Buyruqlar ro‘yxati:\n\n/start - Ro‘yxatdan o‘tish\n/my_refs - Referallarni ko‘rish"
     )
 
 
@@ -404,10 +429,10 @@ async def on_startup_hook(app):
             scope=BotCommandScopeAllPrivateChats()
         )
         app.bot_data["startup_time"] = datetime.now(timezone.utc)
-        app.job_queue.run_repeating(chat_member_periodic_update, interval=60, first=60)
-        logger.info("bot/on_startup_hook: database and tasks ran successfully")
+        app.job_queue.run_repeating(chat_member_periodic_update, interval=3600, first=10)
+        logger.info("on_startup_hook: database and tasks ran successfully")
     except Exception as e:
-        logger.critical("bot/on_startup_hook: database and tasks run error %s", e, exc_info=True)
+        logger.critical("on_startup_hook: database and tasks run error %s", e, exc_info=True)
         sys.exit(1)
 
 
@@ -419,11 +444,20 @@ def main():
 
     try:
         # Application
-        app = ApplicationBuilder().token(SECRET_TOKEN).post_init(on_startup_hook).build()
+        app = (
+            ApplicationBuilder()
+            .token(SECRET_TOKEN)
+            .get_updates_connect_timeout(10)
+            .get_updates_read_timeout(20)
+            .get_updates_write_timeout(20)
+            .get_updates_pool_timeout(5)
+            .post_init(on_startup_hook)
+            .build())
 
         # Handlers
         app.add_handler(ChatMemberHandler(self_chat_member_update, chat_member_types=ChatMemberHandler.MY_CHAT_MEMBER))
         app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_member_update))
+        app.add_handler(ChatMemberHandler(new_chat_member_update, chat_member_types=ChatMemberHandler.CHAT_MEMBER))
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("my_refs", my_refs))
         app.add_handler(CommandHandler("help", cmd_help))
@@ -431,7 +465,7 @@ def main():
         # Polling
         app.run_polling(drop_pending_updates=False, allowed_updates=["message", "chat_member", "my_chat_member"])
     except Exception as e:
-        logger.critical("bot/: could not run application due to %s", e, exc_info=True)
+        logger.critical("could not run application due to %s", e, exc_info=True)
         sys.exit(1)
 
 if __name__ == "__main__":

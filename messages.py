@@ -15,12 +15,12 @@ async def send_reply_message(update: Update, text: str):
     try:
         await update.message.reply_text(text)
         logger.debug(
-            "messages/send_reply_message: sent reply message to user %s: %s",
+            "send_reply_message: sent reply message to user %s: %s",
             update.effective_user.id, text
         )
     except TelegramError as e:
         logger.warning(
-            "messages/send_reply_message: failed to send reply message to user %s: %s",
+            "send_reply_message: failed to send reply message to user %s: %s",
             update.effective_user.id, e
         )
 
@@ -29,12 +29,12 @@ async def send_effective_chat_message(update: Update, text: str):
     try:
         await update.effective_chat.send_message(text)
         logger.debug(
-            "messages/send_effective_chat_message: sent effective chat message to chat %s: %s",
+            "send_effective_chat_message: sent effective chat message to chat %s: %s",
             update.effective_chat.id, text
         )
     except TelegramError as e:
         logger.warning(
-            "messages/send_effective_chat_message: failed to send effective chat message to chat %s: %s",
+            "send_effective_chat_message: failed to send effective chat message to chat %s: %s",
             update.effective_chat.id, e
         )
 
@@ -46,11 +46,11 @@ async def send_default_context_message(context: ContextTypes.DEFAULT_TYPE, text:
             text=text
         )
         logger.debug(
-            "messages/send_default_context_message: sent default context message to chat %s: %s",
+            "send_default_context_message: sent default context message to chat %s: %s",
             chat_id, text
         )
     except TelegramError as e:
         logger.warning(
-            "messages/send_default_context_message: failed to send default context message to chat %s: %s",
+            "send_default_context_message: failed to send default context message to chat %s: %s",
             chat_id, e
         )

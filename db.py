@@ -26,7 +26,7 @@ for var in REQUIRED_ENV_VARS:
         missing.append(var)
 
 if missing:
-    logger.error(f"db/: Database properties are missing in .env: {missing} fields")
+    logger.error(f"Database properties are missing in .env: {missing} fields")
     raise RuntimeError(f"Database properties are missing in .env: {missing} fields")
 
 DATABASE_URL = (
@@ -67,16 +67,16 @@ async def init_database():
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            logger.info("db/init_database: database tables successfully initialized")
+            logger.info("init_database: database tables successfully initialized")
     except Exception as e:
-        logger.exception("db/init_database: database initialization error %s", e)
-        raise
+        logger.exception("init_database: database initialization error %s", e)
+        raise e
 
 
 # Conventions (please use only in this file)
 
 async def _find_inviter(session: AsyncSession, telegram_id: int, ref_code: str | None) -> int | None:
-    logger.debug("db/_find_inviter: started for %s with ref_code=%s", telegram_id, ref_code)
+    logger.debug("_find_inviter: started for %s with ref_code=%s", telegram_id, ref_code)
     if ref_code:
         inviter_id = await session.scalar(
             select(UserModel.telegram_id)
@@ -88,19 +88,19 @@ async def _find_inviter(session: AsyncSession, telegram_id: int, ref_code: str |
             )
         )
         logger.debug(
-            "db/_find_inviter: finished with inviter %s for user %s with ref_code=%s",
+            "_find_inviter: finished with inviter %s for user %s with ref_code=%s",
             inviter_id, telegram_id, ref_code
         )
         return inviter_id
     else:
-        logger.debug("db/_find_inviter: finished with could not find any inviter with ref_code=%s", ref_code)
+        logger.debug("_find_inviter: finished with could not find any inviter with ref_code=%s", ref_code)
         return None
 
 
 # Functions
 
 async def is_registered(telegram_id: int) -> bool:
-    logger.debug("db/is_registered: started for user %s", telegram_id)
+    logger.debug("is_registered: started for user %s", telegram_id)
     try:
         async with db_session() as session:
             user_id = await session.scalar(
@@ -109,15 +109,15 @@ async def is_registered(telegram_id: int) -> bool:
                     UserModel.telegram_id == telegram_id
                 )
             )
-            logger.debug("db/is_registered: finished for user %s with result: %s", telegram_id, user_id)
+            logger.debug("is_registered: finished for user %s with result: %s", telegram_id, user_id)
             return user_id is not None
     except OperationalError as e:
-        logger.exception("db/is_registered: database connection error %s for user %s", e, telegram_id)
+        logger.exception("is_registered: database connection error %s for user %s", e, telegram_id)
         raise DatabaseConnectionError()
 
 
 async def count_referrals(telegram_id: int) -> int:
-    logger.debug("db/count_referrals: started for user %s", telegram_id)
+    logger.debug("count_referrals: started for user %s", telegram_id)
     try:
         async with db_session() as session:
             count = await session.scalar(
@@ -126,15 +126,15 @@ async def count_referrals(telegram_id: int) -> int:
                     UserModel.inviter_id == telegram_id
                 )
             )
-            logger.debug("db/count_referrals: finished for user %s with result: %s", telegram_id, count)
+            logger.debug("count_referrals: finished for user %s with result: %s", telegram_id, count)
             return count or 0
     except OperationalError as e:
-        logger.exception("db/count_referrals: database connection error %s for user %s", e, telegram_id)
+        logger.exception("count_referrals: database connection error %s for user %s", e, telegram_id)
         raise DatabaseConnectionError()
 
 
 async def get_registered_referral_counts(user_ids, chunk_size) -> dict:
-    logger.debug("db/get_registered_referral_counts: started")
+    logger.debug("get_registered_referral_counts: started")
     registered_ids: set[int] = set()
     referral_counts: dict[int, int] = {}
     try:
@@ -147,7 +147,7 @@ async def get_registered_referral_counts(user_ids, chunk_size) -> dict:
                 )
                 registered_ids |= {r[0] for r in rows.all()}
             if not registered_ids:
-                logger.debug("db/get_registered_referral_counts: finished -> no registered users found")
+                logger.debug("get_registered_referral_counts: finished -> no registered users found")
                 return {}
             rows = await session.execute(
                 select(UserModel.inviter_id, func.count().label("count"))
@@ -157,15 +157,15 @@ async def get_registered_referral_counts(user_ids, chunk_size) -> dict:
             for inviter_id, count in rows.all():
                 referral_counts[inviter_id] = count or 0
             result = {user_id: referral_counts.get(user_id, 0) for user_id in registered_ids}
-            logger.debug("db/get_registered_referral_counts: finished with result %s", result)
+            logger.debug("get_registered_referral_counts: finished with result %s", result)
             return result
     except OperationalError as e:
-        logger.exception("db/get_registered_referral_counts: database connection error %s", e)
+        logger.exception("get_registered_referral_counts: database connection error %s", e)
         raise DatabaseConnectionError()
 
 
 async def register_user(telegram_id: int, username: str, ref_code: str | None) -> (UserModel, int):
-    logger.debug("db/register_user: started for user %s", telegram_id)
+    logger.debug("register_user: started for user %s", telegram_id)
     try:
         async with db_session() as session:
             try:
@@ -175,25 +175,25 @@ async def register_user(telegram_id: int, username: str, ref_code: str | None) -
                     session.add(new_user)
                 await session.refresh(new_user)
                 logger.debug(
-                    "db/register_user: successfully registered user %s as object %s",
+                    "register_user: successfully registered user %s as object %s",
                     telegram_id, new_user
                 )
                 return [new_user, inviter_id]
 
             except IntegrityError as e:
                 logger.warning(
-                    "db/register_user: could not create new user object due to IntegrityError %s",
+                    "register_user: could not create new user object due to IntegrityError %s",
                     e
                 )
                 await session.rollback()
                 raise UserAlreadyExists()
     except OperationalError as e:
-        logger.exception("db/register_user: database connection error %s for user %s", e, telegram_id)
+        logger.exception("register_user: database connection error %s for user %s", e, telegram_id)
         raise DatabaseConnectionError()
 
 
 async def include_user(telegram_id: int) -> None:
-    logger.debug("db/include_user: started for user %s", telegram_id)
+    logger.debug("include_user: started for user %s", telegram_id)
     try:
         async with db_session() as session:
             try:
@@ -202,31 +202,31 @@ async def include_user(telegram_id: int) -> None:
                     session.add(new_user)
                 await session.refresh(new_user)
                 logger.debug(
-                    "db/include_user: successfully included user %s as object %s",
+                    "include_user: successfully included user %s as object %s",
                     telegram_id, new_user
                 )
                 return
 
             except IntegrityError as e:
                 logger.warning(
-                    "db/include_user: could not create new user object due to IntegrityError %s",
+                    "include_user: could not create new user object due to IntegrityError %s",
                     e
                 )
                 await session.rollback()
                 raise UserAlreadyExists()
     except OperationalError as e:
-        logger.exception("db/include_user: database connection error %s for user %s", e, telegram_id)
+        logger.exception("include_user: database connection error %s for user %s", e, telegram_id)
         raise DatabaseConnectionError()
 
 
 async def get_included_user_ids() -> list:
-    logger.debug("db/get_included_user_ids: started")
+    logger.debug("get_included_user_ids: started")
     try:
         async with db_session() as session:
             query = await session.execute(select(GroupUserModel.telegram_id))
             user_ids = [row[0] for row in query.all()]
-            logger.debug("db/get_included_user_ids: finished with result: %s", user_ids)
+            logger.debug("get_included_user_ids: finished with result: %s", user_ids)
             return user_ids
     except OperationalError as e:
-        logger.exception("db/get_included_user_ids: database connection error %s", e)
+        logger.exception("get_included_user_ids: database connection error %s", e)
         raise DatabaseConnectionError()
